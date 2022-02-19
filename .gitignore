@@ -1,2 +1,3 @@
 replays/*
-*.pyc
+**.pyc
+**.ini
