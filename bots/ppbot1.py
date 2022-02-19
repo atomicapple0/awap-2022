@@ -18,6 +18,8 @@ ROAD_TYPE = 1
 TOWER_TYPE = 2
 GENERATOR_TYPE = 3
 
+EARLYGAME_ROUNDS = 50
+
 class MyPlayer(Player):
     def __init__(self):
         return
@@ -56,14 +58,6 @@ class MyPlayer(Player):
                             prev[nx][ny] = (x, y)
                         heapq.heappush(pq, (dist[nx][ny], (nx,ny)))
     
-    def population_claimed(self, x, y):
-        for (dx,dy) in tower_range:
-            nx = x + dx
-            ny = y + dy
-            if self.in_bounds(nx, ny) and self.structmap[nx][ny] == ALLY_STRUCT and self.typemap[nx][ny] == TOWER_TYPE:
-                return True
-        return False
-
     def calc_targets(self):
         # Compute distances to ally locations
         ally_sources = []
@@ -79,9 +73,9 @@ class MyPlayer(Player):
         self.dijkstra(ally_sources, self.ally_dist, self.build_prev)
 
         self.targets = []
-        populations = [ [0] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
         costs = [ [0] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
         location_scores = [ [0] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
+        population_scores = [ [0] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
         for x in range(self.MAP_WIDTH):
             for y in range(self.MAP_HEIGHT):
                 if self.map[x][y].structure is not None:
@@ -92,17 +86,15 @@ class MyPlayer(Player):
                     nx = x + dx
                     ny = y + dy
                     if self.in_bounds(nx, ny):
-                        if self.population_claimed(nx, ny):
-                            continue
-                        total_population += self.map[nx][ny].population
+                        total_population += self.populations[nx][ny]
                 location_score = 0
-                if self.turn_num < 40:
+                if self.turn_num < EARLYGAME_ROUNDS:
                     # early game
-                    location_score = 1 - (self.enemy_generator_dist[x][y] - self.ally_generator_dist[x][y]) / (self.MAP_WIDTH + self.MAP_HEIGHT)
+                    location_score = 1 - abs(self.enemy_generator_dist[x][y] - self.ally_generator_dist[x][y]) / (self.MAP_WIDTH + self.MAP_HEIGHT)
                 else:
                     # late game
                     location_score = 1 - self.ally_dist[x][y] / (self.MAP_WIDTH + self.MAP_HEIGHT)
-                populations[x][y] = total_population / (len(tower_range) * 10)
+                population_scores[x][y] = total_population / (len(tower_range) * 10)
                 costs[x][y] = self.ally_dist[x][y]*StructureType.ROAD.get_base_cost() + self.map[x][y].passability*StructureType.TOWER.get_base_cost()
                 location_scores[x][y] = location_score
         cost_max = 0
@@ -120,9 +112,11 @@ class MyPlayer(Player):
                 if self.map[x][y].structure is not None:
                     # can't build here
                     continue
-                if populations[x][y] == 0:
+                if population_scores[x][y] == 0:
                     continue
-                score = populations[x][y] + costs[x][y] + location_scores[x][y]
+                if self.ally_dist[x][y] >= infty * 0.5:
+                    continue
+                score = population_scores[x][y] + costs[x][y] + location_scores[x][y]
                 candidates.append((score, (x,y)))
         list.sort(candidates, reverse=True)
         self.targets = []
@@ -149,6 +143,12 @@ class MyPlayer(Player):
         self.dijkstra(self.ally_generators, self.ally_generator_dist)
         self.enemy_generator_dist = [ [ infty ] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
         self.dijkstra(self.enemy_generators, self.enemy_generator_dist)
+
+        self.populations = [ [ 0 ] * self.MAP_HEIGHT for i in range(self.MAP_WIDTH) ]
+        for x in range(self.MAP_WIDTH):
+            for y in range(self.MAP_HEIGHT):
+                self.populations[x][y] = self.map[x][y].population
+
     
     def can_build(self, raw_cost, x, y):
         if not self.passable(x,y):
@@ -167,10 +167,24 @@ class MyPlayer(Player):
     def try_build(self, sttype, x, y):
         if not self.can_build(sttype.get_base_cost(), x, y):
             return
+        if sttype == StructureType.TOWER:
+            tot = 0
+            for (dx,dy) in tower_range:
+                nx = x + dx
+                ny = y + dy
+                if self.in_bounds(nx,ny):
+                    tot += self.populations[nx][ny]
+            if tot == 0:
+                return
         self.build(sttype, x, y)
         self.structmap[x][y] = ALLY_STRUCT
         if sttype == StructureType.TOWER:
             self.typemap[x][y] = TOWER_TYPE
+            for (dx,dy) in tower_range:
+                nx = x + dx
+                ny = y + dy
+                if self.in_bounds(nx,ny):
+                    self.populations[nx][ny] = 0
         else:
             self.typemap[x][y] = ROAD_TYPE
         self.money -= sttype.get_base_cost() * self.map[x][y].passability
@@ -184,11 +198,37 @@ class MyPlayer(Player):
         locs.reverse()
         for (locx, locy) in locs:
             if (locx, locy) == (x,y):
-                if not self.population_claimed(locx, locy):
-                    self.try_build(StructureType.TOWER, locx, locy)
+                self.try_build(StructureType.TOWER, locx, locy)
             else:
-                if self.money >= 260:
+                threshold = self.map[self.targets[0][0]][self.targets[0][1]].passability * StructureType.TOWER.get_base_cost()
+                if self.money >= threshold:
                     self.try_build(StructureType.ROAD, locx, locy)
+    
+    def block_resources(self, cost_limit=infty):
+        # sort by distance to resource locs
+        block_locs = []
+        for x in range(self.MAP_WIDTH):
+            for y in range(self.MAP_HEIGHT):
+                if self.passable(x, y) and self.ally_dist[x][y] < infty:
+                    near_tower = False
+                    for (dx,dy) in tower_range:
+                        nx = x + dx
+                        ny = y + dy
+                        if self.in_bounds(nx,ny):
+                            if self.structmap[nx][ny] == ALLY_STRUCT and self.typemap[nx][ny] == TOWER_TYPE:
+                                near_tower = True
+                                break
+                if near_tower:
+                    block_locs.append((x,y))
+
+        # build roads everywhere
+        cost = 0
+        for (x,y) in block_locs:
+            if self.can_build(StructureType.ROAD.get_base_cost(), x, y):
+                cur_cost = StructureType.ROAD.get_base_cost() * self.map[x][y].passability
+                if cost + cur_cost > cost_limit:
+                    continue
+                self.try_build(StructureType.ROAD, x, y)
     
     def play_turn(self, turn_num, map, player_info):
         self.turn_num = turn_num
@@ -226,12 +266,17 @@ class MyPlayer(Player):
 
         self.money = player_info.money
 
-        # build paths
-        for (x,y) in self.targets:
-            self.build_towards(x,y)
-        
-        # build towers
-        for (x,y) in self.targets:
-            if not self.population_claimed(x, y):
+        if len(self.targets) == 0:
+            # greedily build roads close to resources
+            self.block_resources()
+        else:
+            # build paths
+            for (x,y) in self.targets:
+                self.build_towards(x,y)
+            
+            # build towers
+            for (x,y) in self.targets:
                 self.try_build(StructureType.TOWER, x, y)
+            
+            self.block_resources(20)
         return
