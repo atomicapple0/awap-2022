@@ -18,7 +18,7 @@ ROAD_TYPE = 1
 TOWER_TYPE = 2
 GENERATOR_TYPE = 3
 
-EARLYGAME_ROUNDS = 50
+EARLYGAME_ROUNDS = 20
 
 class MyPlayer(Player):
     def __init__(self):
@@ -90,7 +90,7 @@ class MyPlayer(Player):
                 location_score = 0
                 if self.turn_num < EARLYGAME_ROUNDS:
                     # early game
-                    location_score = 1 - abs(self.enemy_generator_dist[x][y] - self.ally_generator_dist[x][y]) / (self.MAP_WIDTH + self.MAP_HEIGHT)
+                    location_score = 1 - abs(self.enemy_generator_dist[x][y] - 1.2*self.ally_generator_dist[x][y]) / (self.MAP_WIDTH + self.MAP_HEIGHT)
                 else:
                     # late game
                     location_score = 1 - self.ally_dist[x][y] / (self.MAP_WIDTH + self.MAP_HEIGHT)
@@ -116,7 +116,7 @@ class MyPlayer(Player):
                     continue
                 if self.ally_dist[x][y] >= infty * 0.5:
                     continue
-                score = population_scores[x][y] + costs[x][y] + location_scores[x][y]
+                score = 5*population_scores[x][y] + costs[x][y] + location_scores[x][y]
                 candidates.append((score, (x,y)))
         list.sort(candidates, reverse=True)
         self.targets = []
@@ -201,6 +201,8 @@ class MyPlayer(Player):
                 self.try_build(StructureType.TOWER, locx, locy)
             else:
                 threshold = self.map[self.targets[0][0]][self.targets[0][1]].passability * StructureType.TOWER.get_base_cost()
+                if self.turn_num < EARLYGAME_ROUNDS:
+                    threshold = 0
                 if self.money >= threshold:
                     self.try_build(StructureType.ROAD, locx, locy)
     
@@ -210,15 +212,16 @@ class MyPlayer(Player):
         for x in range(self.MAP_WIDTH):
             for y in range(self.MAP_HEIGHT):
                 if self.passable(x, y) and self.ally_dist[x][y] < infty:
-                    near_tower = False
+                    # block population centers that we control
+                    near_pop = False
                     for (dx,dy) in tower_range:
                         nx = x + dx
                         ny = y + dy
                         if self.in_bounds(nx,ny):
-                            if self.structmap[nx][ny] == ALLY_STRUCT and self.typemap[nx][ny] == TOWER_TYPE:
-                                near_tower = True
+                            if self.map[nx][ny].population > 0 and self.populations[nx][ny] == 0:
+                                near_pop = True
                                 break
-                    if near_tower:
+                    if near_pop:
                         block_locs.append((x,y))
 
         # build roads everywhere
@@ -229,6 +232,23 @@ class MyPlayer(Player):
                 if cost + cur_cost > cost_limit:
                     continue
                 self.try_build(StructureType.ROAD, x, y)
+    
+    def build_towers(self):
+        locs = []
+        for x in range(self.MAP_WIDTH):
+            for y in range(self.MAP_HEIGHT):
+                if self.can_build(StructureType.TOWER.get_base_cost(), x, y):
+                    total_population = 0
+                    for (dx,dy) in tower_range:
+                        nx = x + dx
+                        ny = y + dy
+                        if self.in_bounds(nx, ny):
+                            total_population += self.populations[nx][ny]
+                    if total_population > 0:
+                        locs.append((total_population, (x,y)))
+        locs.sort(reverse=True)
+        for (p,(x,y)) in locs:
+            self.try_build(StructureType.TOWER, x, y)
     
     def play_turn(self, turn_num, map, player_info):
         self.turn_num = turn_num
@@ -271,12 +291,12 @@ class MyPlayer(Player):
             self.block_resources()
         else:
             # build paths
-            for (x,y) in self.targets:
-                self.build_towards(x,y)
+            self.build_towards(self.targets[0][0], self.targets[0][1])
             
             # build towers
-            for (x,y) in self.targets:
-                self.try_build(StructureType.TOWER, x, y)
+            self.build_towers()
             
-            self.block_resources(20)
+            if self.turn_num >= 120:
+                self.block_resources(50)
+
         return
